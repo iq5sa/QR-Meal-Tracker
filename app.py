@@ -1,210 +1,304 @@
-import tkinter as tk
-from tkinter import ttk
-from tkinter import PhotoImage
-from PIL import Image, ImageTk
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QLineEdit, QPushButton,
+    QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QDialog, QFileDialog, QComboBox
+)
+from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtCore import Qt
 from datetime import datetime
+import sys
 import os
 
-from db import (
+from casher_db import (
     init_db,
+    insert_fake_orders,
     log_meal_to_db,
-    insert_fake_data,
-    clear_all_data,
     export_monthly_stats_to_excel,
-    get_monthly_stats
+    get_monthly_stats,
+    show_customers_and_alternates  # <-- Import the new function
 )
 
-
-# ---------- Functions ----------
-
-def log_meal():
-    customer_id = entry_customer_id.get().strip()
-    if not customer_id:
-        return
-
-    success = log_meal_to_db(customer_id)
-    if success:
-        table.insert('', 'end', values=(customer_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        status_label.config(text=f"✅ تم تسجيل الوجبة للزبون {customer_id}.", fg="green")
-    else:
-        status_label.config(text=f"⚠️ الموظف {customer_id} تم تسجيله اليوم بالفعل.", fg="red")
-
-    entry_customer_id.delete(0, tk.END)
-    entry_customer_id.focus()
-
-def show_stats():
-    stats_window = tk.Toplevel(root)
-    stats_window.title("إحصائيات الشهر الحالي")
-    stats_window.geometry("400x400")
-    stats_window.configure(bg=bg_color)
-
-    tk.Label(stats_window, text="📊 إحصائيات الوجبات حسب الموظف", font=title_font, bg=bg_color).pack(pady=10)
-
-    stats_table = ttk.Treeview(stats_window, columns=("ID", "Meals"), show='headings')
-    stats_table.heading("ID", text="رقم الموظف")
-    stats_table.heading("Meals", text="عدد الوجبات")
-    stats_table.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
-    for customer_id, count in get_monthly_stats():
-        stats_table.insert('', 'end', values=(customer_id, count))
-
-    status_export = tk.Label(stats_window, text="", font=body_font, bg=bg_color)
-    status_export.pack(pady=(5, 0))
-
-    def export_stats():
-        try:
-            file_path = export_monthly_stats_to_excel()
-            status_export.config(
-                text=f"✅ تم تصدير البيانات إلى:\n{file_path}",
-                fg="green"
-            )
-        except Exception as e:
-            status_export.config(
-                text=f"❌ خطأ أثناء التصدير:\n{str(e)}",
-                fg="red"
-            )
-
-    export_button = tk.Button(stats_window, text="💾 تصدير الإحصائيات إلى Excel", font=button_font, bg=button_color, fg="white", command=export_stats)
-    export_button.pack(pady=(5, 10))
-
-# ---------- Theme & Fonts ----------
-
-bg_color = "#eaeaea"
+bg_color = "#312f2f"
 button_color = "#2b5797"
-title_font = ("Helvetica", 16, "bold")
-body_font = ("Helvetica", 12)
-button_font = ("Helvetica", 12, "bold")
-
-# ---------- Init ----------
-
-init_db()
-# insert_fake_data()  # Uncomment if needed
-
-root = tk.Tk()
-root.title("برنامج تسجيل الوجبات")
-root.geometry("800x700")
-root.configure(bg=bg_color)
-root.resizable(False, False)
 
 
-def add_placeholder(entry, placeholder_text, color='grey'):
-    def on_focus_in(event):
-        if entry.get() == placeholder_text:
-            entry.delete(0, tk.END)
-            entry.config(fg='black')
+class StatsDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("إحصائيات شهر محدد")
+        self.setFixedSize(500, 500)
+        self.setStyleSheet(f"background-color: {bg_color};")
 
-    def on_focus_out(event):
-        if not entry.get():
-            entry.insert(0, placeholder_text)
-            entry.config(fg=color)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("\ud83d\udcca إحصائيات الوجبات حسب الموظف"))
 
-    entry.insert(0, placeholder_text)
-    entry.config(fg=color)
-    entry.bind("<FocusIn>", on_focus_in)
-    entry.bind("<FocusOut>", on_focus_out)
+        # Month selection
+        self.month_combo = QComboBox()
+        self.month_combo.setStyleSheet("font-size: 16px;")
+        months = [f"{m:02d}" for m in range(1, 13)]
+        self.month_combo.addItems(months)
+        self.month_combo.setCurrentIndex(datetime.now().month - 1)
+        layout.addWidget(QLabel("اختر الشهر:"))
+        layout.addWidget(self.month_combo)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["رقم الموظف", "عدد الوجبات"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        self.status_label = QLabel()
+        layout.addWidget(self.status_label)
+
+        export_button = QPushButton("\ud83d\udcc0 تصدير الإحصائيات إلى Excel")
+        export_button.setStyleSheet(f"background-color: {button_color}; color: white;")
+        export_button.clicked.connect(self.export_stats)
+        layout.addWidget(export_button)
+
+        alt_button = QPushButton("\ud83d\udc65 عرض المناوبين")
+        alt_button.setStyleSheet(f"background-color: #e67e22; color: white;")
+        alt_button.clicked.connect(self.show_alternates)
+        layout.addWidget(alt_button)
+
+        self.setLayout(layout)
+        self.month_combo.currentIndexChanged.connect(self.load_data)
+        self.load_data()
+
+    def load_data(self):
+        selected_month = self.month_combo.currentText()
+        year = datetime.now().year
+        from casher_db import create_connection
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT customers.code, COUNT(DISTINCT DATE(orders.created_at)) AS meals_count
+            FROM orders
+            JOIN customers ON orders.customer_id = customers.id
+            WHERE strftime('%Y-%m', orders.created_at) = ?
+            GROUP BY customers.code
+            ORDER BY meals_count DESC
+        ''', (f"{year}-{selected_month}",))
+        data = cursor.fetchall()
+        conn.close()
+        self.table.setRowCount(len(data))
+        for row_idx, (customer_id, count) in enumerate(data):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(str(customer_id)))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(str(count)))
+
+    def export_stats(self):
+        selected_month = self.month_combo.currentText()
+        year = datetime.now().year
+        filename = f"meal_stats_{year}-{selected_month}.xlsx"
+        from casher_db import create_connection
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT customers.code, COUNT(DISTINCT DATE(orders.created_at)) AS meals_count
+            FROM orders
+            JOIN customers ON orders.customer_id = customers.id
+            WHERE strftime('%Y-%m', orders.created_at) = ?
+            GROUP BY customers.code
+            ORDER BY meals_count DESC
+        ''', (f"{year}-{selected_month}",))
+        stats = cursor.fetchall()
+        conn.close()
+
+        export_folder = "exports"
+        os.makedirs(export_folder, exist_ok=True)
+        file_path = os.path.join(export_folder, filename)
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "الإحصائيات الشهرية"
+        ws.append(["كود الموظف", "عدد الوجبات"])
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        for row in stats:
+            ws.append(row)
+        for col in ws.columns:
+            max_length = max(len(str(cell.value)) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = max_length + 2
+
+        # Add export date
+        ws.append([])
+        ws.append(["تاريخ تصدير الإحصائية", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+
+        wb.save(file_path)
+        self.status_label.setText(f"\u2705 تم التصدير إلى:\n{file_path}\nتاريخ تصدير الإحصائية: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def show_alternates(self):
+        # Show a dialog with customer and their مناوب
+        alt_dialog = QDialog(self)
+        alt_dialog.setWindowTitle("قائمة المناوبين")
+        alt_dialog.setFixedSize(400, 400)
+        alt_dialog.setStyleSheet(f"background-color: {bg_color};")
+        layout = QVBoxLayout()
+        label = QLabel("\ud83d\udc65 قائمة الموظفين ومناوبيهم")
+        layout.addWidget(label)
+
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["اسم الموظف", "اسم المناوب"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(table)
+
+        # Get data from db_new
+        conn_data = []
+        try:
+            import casher_db
+            import io
+            import sys as _sys
+            old_stdout = _sys.stdout
+            _sys.stdout = mystdout = io.StringIO()
+            casher_db.show_customers_and_alternates()
+            _sys.stdout = old_stdout
+            lines = mystdout.getvalue().splitlines()[2:]  # skip header
+            for line in lines:
+                parts = line.split('|')
+                if len(parts) == 2:
+                    conn_data.append([parts[0].strip(), parts[1].strip()])
+        except Exception as e:
+            conn_data = [["خطأ", str(e)]]
+
+        table.setRowCount(len(conn_data))
+        for row_idx, (name, alt) in enumerate(conn_data):
+            table.setItem(row_idx, 0, QTableWidgetItem(name))
+            table.setItem(row_idx, 1, QTableWidgetItem(alt))
+
+        alt_dialog.setLayout(layout)
+        alt_dialog.exec()
 
 
-#Main button
-def create_modern_button(master, text, command, bg="#2b5797", fg="#2b5797", hover_bg="#1e3d73"):
-    def on_enter(e):
-        btn['background'] = hover_bg
+class MealTrackerApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("برنامج تسجيل الوجبات")
+        self.setFixedSize(800, 700)
+        self.setStyleSheet(f"background-color: {bg_color};")
 
-    def on_leave(e):
-        btn['background'] = bg
+        main_layout = QVBoxLayout()
 
-    btn = tk.Button(master,
-                    text=text,
-                    font=("Helvetica", 12, "bold"),
-                    bg=bg,
-                    fg=fg,
-                    activeforeground=fg,
-                    activebackground=hover_bg,
-                    bd=0,
-                    padx=20,
-                    pady=10,
-                    cursor="hand2")
+        logo_path = os.path.join("assets", "logo.png")
+        if os.path.exists(logo_path):
+            logo = QLabel()
+            logo.setPixmap(QPixmap(logo_path).scaled(300, 85, Qt.KeepAspectRatio))
+            logo.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(logo)
 
-    btn.bind("<Enter>", on_enter)
-    btn.bind("<Leave>", on_leave)
-    btn.configure(command=command)
-    return btn
+        title1 = QLabel("معهد التدريب النفطي / بيجي")
+        title2 = QLabel("برنامج تسجيل استلام الوجبات")
+        for title in [title1, title2]:
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
+            main_layout.addWidget(title)
+
+        self.entry = QLineEdit()
+        self.entry.setPlaceholderText("رقم الموظف")
+        self.entry.setAlignment(Qt.AlignRight)
+        self.entry.setStyleSheet("padding: 12px; font-size: 16px; border: 1px solid #ccc;")
+        main_layout.addWidget(self.entry)
+
+        btn_log = QPushButton("\ud83d\udcdd تسجيل الوجبة")
+        btn_log.setStyleSheet(f"background-color: #0078D7; color: white; padding: 10px; font-weight: bold;")
+        btn_log.clicked.connect(self.log_meal)
+        main_layout.addWidget(btn_log)
+
+        btn_stats = QPushButton("\ud83d\udcca عرض الإحصائيات")
+        btn_stats.setStyleSheet(f"background-color: #4CAF50; color: white; padding: 10px; font-weight: bold;")
+        btn_stats.clicked.connect(self.show_stats)
+        main_layout.addWidget(btn_stats)
+
+        # Button to show today's orders
+        btn_today = QPushButton("عرض طلبات اليوم")
+        btn_today.setStyleSheet("background-color: #e74c3c; color: white; padding: 10px; font-weight: bold;")
+        btn_today.clicked.connect(self.show_today_orders)
+        main_layout.addWidget(btn_today)
+
+        self.status_label = QLabel()
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 14px; color: #333;")
+        main_layout.addWidget(self.status_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["رقم الموظف", "الوقت والتاريخ"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        main_layout.addWidget(self.table)
+
+        self.setLayout(main_layout)
+        self.entry.setFocus()
+
+    def log_meal(self):
+        customer_id = self.entry.text().strip()
+        if not customer_id:
+            self.status_label.setText("يرجى إدخال رقم الموظف")
+            self.status_label.setStyleSheet("color: orange;")
+            return
+
+        success = log_meal_to_db(customer_id)
+        if success:
+            self.table.insertRow(self.table.rowCount())
+            self.table.setItem(self.table.rowCount()-1, 0, QTableWidgetItem(customer_id))
+            self.table.setItem(self.table.rowCount()-1, 1, QTableWidgetItem(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            self.status_label.setText(f"\u2705 تم تسجيل الوجبة للزبون {customer_id}")
+            self.status_label.setStyleSheet("color: green;")
+        else:
+            self.status_label.setText(f"\u26a0️ الموظف {customer_id} تم تسجيله اليوم بالفعل أو الرقم غير صحيح")
+            self.status_label.setStyleSheet("color: red;")
+
+        self.entry.clear()
+        self.entry.setFocus()
+
+    def show_stats(self):
+        dialog = StatsDialog()
+        dialog.exec()
+
+    def show_today_orders(self):
+        from casher_db import create_connection
+        conn = create_connection()
+        cursor = conn.cursor()
+        today = datetime.now().date().isoformat()
+        cursor.execute('''
+            SELECT customers.code, customers.name, orders.created_at
+            FROM orders
+            JOIN customers ON orders.customer_id = customers.id
+            WHERE DATE(orders.created_at) = ?
+            ORDER BY orders.created_at DESC
+        ''', (today,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("طلبات اليوم")
+        dialog.setFixedSize(500, 400)
+        dialog.setStyleSheet(f"background-color: {bg_color};")
+        layout = QVBoxLayout()
+        label = QLabel("طلبات اليوم")
+        layout.addWidget(label)
+
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["رقم الموظف", "اسم الموظف", "الوقت والتاريخ"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(table)
+
+        table.setRowCount(len(rows))
+        for row_idx, (code, name, created_at) in enumerate(rows):
+            table.setItem(row_idx, 0, QTableWidgetItem(str(code)))
+            table.setItem(row_idx, 1, QTableWidgetItem(str(name)))
+            table.setItem(row_idx, 2, QTableWidgetItem(str(created_at)))
+
+        dialog.setLayout(layout)
+        dialog.exec()
 
 
-# ---------- Logo ----------
-logo_path = os.path.join("assets", "logo.png")
-if os.path.exists(logo_path):
-    img = Image.open(logo_path)
-    resized_img = img.resize((300, 85))  # Set desired width x height here
-    logo_img = ImageTk.PhotoImage(resized_img)
-    tk.Label(root, image=logo_img, bg=bg_color).pack(pady=(10, 5))
-
-# ---------- Title ----------
-tk.Label(root, text="معهد التدريب النفطي / بيجي", font=title_font, bg=bg_color, fg="#333").pack(pady=(0, 10))
-
-tk.Label(root, text="برنامج تسجيل استلام الوجبات", font=title_font, bg=bg_color, fg="#333").pack(pady=(0, 10))
-
-# --------- Input Section with Label ---------
-input_wrapper = tk.Frame(root, bg=bg_color)
-input_wrapper.pack(pady=(10, 5))
-
-# Label above input field
-input_label = tk.Label(input_wrapper, text="رقم التعريفي للموظف",fg="#333", font=("Helvetica", 10, "bold"), bg=bg_color, anchor='e')
-input_label.pack(anchor='e', padx=50)
-
-# Simulated rounded input field container
-rounded_frame = tk.Frame(input_wrapper, bg="#eaeaea", bd=0)
-rounded_frame.pack(padx=10, pady=5)
-
-entry_container = tk.Frame(rounded_frame, bg="#eaeaea")
-entry_container.pack(ipadx=10, ipady=6)
-
-# Optional icon (📷 or PNG)
-qr_icon_path = os.path.join("assets", "qr_icon.png")
-if os.path.exists(qr_icon_path):
-    qr_img = Image.open(qr_icon_path).resize((24, 24))
-    qr_icon = ImageTk.PhotoImage(qr_img)
-    icon_label = tk.Label(entry_container, image=qr_icon, bg="#eaeaea")
-else:
-    icon_label = tk.Label(entry_container, text="📷", font=("Helvetica", 14), bg="#eaeaea")
-
-icon_label.pack(side=tk.RIGHT, padx=(10, 0))
-
-# Entry field itself
-entry_customer_id = tk.Entry(entry_container,
-                             font=("Helvetica", 14),
-                             bd=0,
-                             bg="#eaeaea",
-                             fg="#333",
-                             justify='right',
-                             insertbackground="#333",
-                             width=30)
-entry_customer_id.pack(side=tk.RIGHT, ipady=6, padx=(0, 5))
-entry_customer_id.focus()
-
-
-log_button = create_modern_button(root, "📝 تسجيل الوجبة", log_meal, bg="#0078D7", hover_bg="#005a9e")
-log_button.pack(pady=8)
-
-stats_button = create_modern_button(root, "📊 عرض الإحصائيات", show_stats, bg="#4CAF50", hover_bg="#388E3C")
-stats_button.pack(pady=5)
-
-status_label = tk.Label(root, text="", font=body_font, bg=bg_color)
-status_label.pack(pady=5)
-
-# ---------- Table ----------
-style = ttk.Style()
-style.theme_use("default")
-
-
-
-table = ttk.Treeview(root, columns=("ID", "Time"), show='headings', height=10)
-table.heading("ID", text="رقم الموظف")
-
-table.heading("Time", text="الوقت والتاريخ")
-table.pack(pady=15, padx=15, fill=tk.BOTH)
-
-
-
-
-# ---------- Run ----------
-root.mainloop()
+if __name__ == "__main__":
+    init_db()
+    insert_fake_orders()  # <-- Insert some fake orders for testing
+    app = QApplication(sys.argv)
+    window = MealTrackerApp()
+    window.show()
+    sys.exit(app.exec())
